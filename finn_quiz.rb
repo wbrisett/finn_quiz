@@ -58,8 +58,20 @@ def load_words(path)
     en = w["en"] || w[:en]
     fi = w["fi"] || w[:fi]
     phon = w["phon"] || w[:phon]
-    raise "Invalid word entry: #{w.inspect}" if en.to_s.empty? || fi.to_s.empty?
-    { en: en.to_s.strip, fi: fi.to_s.strip, phon: phon.to_s.strip }
+
+    raise "Invalid word entry: #{w.inspect}" if en.to_s.strip.empty? || fi.nil?
+
+    fi_list =
+      case fi
+      when Array
+        fi.map { |x| x.to_s.strip }.reject(&:empty?)
+      else
+        [fi.to_s.strip]
+      end
+
+    raise "Invalid word entry: #{w.inspect}" if fi_list.empty?
+
+    { en: en.to_s.strip, fi: fi_list, phon: phon.to_s.strip }
   end
 end
 
@@ -74,25 +86,31 @@ end
 # Matching Logic
 # -----------------------------
 
-def match_answer(user, expected, lenient:)
+def match_answer(user, expected_list, lenient:)
   user_n = normalize_basic(user)
-  exp_n  = normalize_basic(expected)
+  exp_norms = expected_list.map { |e| normalize_basic(e) }
 
-  return [:exact, true] if user_n == exp_n
-  return [:no, false] unless lenient
+  if (idx = exp_norms.index(user_n))
+    return [:exact, true, expected_list[idx]]
+  end
+  return [:no, false, nil] unless lenient
 
   user_l = normalize_lenient_umlauts(user)
-  exp_l  = normalize_lenient_umlauts(expected)
+  exp_len = expected_list.map { |e| normalize_lenient_umlauts(e) }
 
-  return [:umlaut_lenient, true] if user_l == exp_l
-  [:no, false]
+  if (idx = exp_len.index(user_l))
+    return [:umlaut_lenient, true, expected_list[idx]]
+  end
+
+  [:no, false, nil]
 end
 
 
-def pick_distractors(pool, correct_fi)
-  candidates = pool.map { |w| w[:fi] }.uniq - [correct_fi]
-  raise "Not enough distractors." if candidates.size < 2
-  candidates.sample(2)
+def pick_distractors(pool, correct_fi_list, n: 2)
+  all_correct = correct_fi_list.to_a
+  candidates = pool.flat_map { |w| w[:fi] }.uniq - all_correct
+  raise "Not enough distractors." if candidates.size < n
+  candidates.sample(n)
 end
 
 # -----------------------------
@@ -113,41 +131,56 @@ def run_quiz(selected, pool:, lenient:, match_game:)
     answer_ok = false
 
     1.upto(2) do |attempt|
-if match_game
-  distractors = pick_distractors(pool, w[:fi])
-  options = ([w[:fi]] + distractors).shuffle
+      if match_game
+        correct_list = w[:fi]
+        shown_correct = correct_list.sample
 
-  say "Options:"
-  options.each { |opt| say "  - #{opt}" }
+        distractors = pick_distractors(pool, correct_list, n: 2)
+        options = ([shown_correct] + distractors).shuffle
 
-  input = prompt("Type the Finnish word: ")
-  kind, ok = match_answer(input, w[:fi], lenient: lenient)
+        say "Options:"
+        options.each { |opt| say "  - #{opt}" }
 
-  if ok
-    stats[:"correct_#{attempt}"] += 1
-    if kind == :umlaut_lenient
-      say "✅ Hyvä! Muista: ä ja ö ovat tärkeitä 😉"
-    else
-      say "✅ Oikein!"
-    end
-    say "   (phonetic: #{w[:phon]})" unless w[:phon].empty?
-    answer_ok = true
-    break
-  else
-    say "\n❌ Yritä uudelleen.\n" if attempt < 2
-  end
-      else
-        input = prompt("Finnish: ")
-        kind, ok = match_answer(input, w[:fi], lenient: lenient)
+        input = prompt("Type the Finnish word: ")
+        kind, ok, matched = match_answer(input, correct_list, lenient: lenient)
 
         if ok
           stats[:"correct_#{attempt}"] += 1
+
           if kind == :umlaut_lenient
             say "✅ Hyvä! Muista: ä ja ö ovat tärkeitä 😉"
           else
             say "✅ Oikein!"
           end
+
+          others = correct_list - [matched]
+          say "   Also accepted: #{others.join(' / ')}" unless others.empty?
           say "   (phonetic: #{w[:phon]})" unless w[:phon].empty?
+
+          answer_ok = true
+          break
+        else
+          say "Yritä uudelleen." if attempt < 2
+        end
+
+      else
+        input = prompt("Finnish: ")
+        kind, ok, matched = match_answer(input, w[:fi], lenient: lenient)
+
+        if ok
+          stats[:"correct_#{attempt}"] += 1
+
+          if kind == :umlaut_lenient
+            say "✅ Hyvä! Muista: ä ja ö ovat tärkeitä 😉"
+          else
+            say "✅ Oikein!"
+          end
+
+          others = w[:fi] - [matched]
+          say "   Also accepted: #{others.join(' / ')}" unless others.empty?
+
+          say "   (phonetic: #{w[:phon]})" unless w[:phon].empty?
+
           answer_ok = true
           break
         else
@@ -158,7 +191,7 @@ if match_game
 
     unless answer_ok
       stats[:failed] += 1
-      say "❌ Oikea sana: #{w[:fi]}#{w[:phon].empty? ? '' : " (#{w[:phon]})"}"
+      say "❌ Oikea sana: #{w[:fi].join(' / ')}#{w[:phon].empty? ? '' : " (#{w[:phon]})"}"
       missed << w
     end
   end
@@ -249,4 +282,3 @@ else
   say
   say "😊 Ei virheitä — hienoa työtä!"
 end
-
