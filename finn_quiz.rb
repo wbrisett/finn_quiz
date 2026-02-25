@@ -1,8 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
-# finn_quiz.rb
-# version 1.0
 
+# finn_quiz.rb
+# Finnish vocabulary quizzer (typing / match-game / listening via Piper)
 
 require "yaml"
 require "time"
@@ -41,6 +41,12 @@ end
 # Text-to-Speech (Piper)
 # -----------------------------
 
+def ensure_terminal_punct(s)
+  t = s.to_s.strip
+  return t if t.empty?
+  t =~ /[.!?]\z/ ? t : "#{t}."
+end
+
 def resolve_executable(cmd)
   return nil if cmd.nil?
   c = cmd.to_s.strip
@@ -59,12 +65,6 @@ def resolve_executable(cmd)
   nil
 end
 
-def ensure_terminal_punct(s)
-  t = s.to_s.strip
-  return t if t.empty?
-  t =~ /[.!?]\z/ ? t : "#{t}."
-end
-
 def piper_speak(text, piper_bin:, piper_model:, volume: nil)
   resolved_piper = resolve_executable(piper_bin)
   raise "Piper binary not found: #{piper_bin}.\nPATH=#{ENV.fetch('PATH', '')}" unless resolved_piper
@@ -72,7 +72,6 @@ def piper_speak(text, piper_bin:, piper_model:, volume: nil)
 
   wav = File.join("/tmp", "finn_quiz_tts_#{Process.pid}_#{SecureRandom.hex(4)}.wav")
 
-  # Piper reads from stdin when no -i is provided.
   ok = IO.popen([resolved_piper, "-m", piper_model, "-f", wav], "r+") do |io|
     io.write(text.to_s)
     io.write("\n")
@@ -85,7 +84,7 @@ def piper_speak(text, piper_bin:, piper_model:, volume: nil)
 
   raise "Piper failed to generate audio." unless ok && File.exist?(wav)
 
-  # macOS playback
+  # macOS playback (Windows/Linux can be added later)
   system("afplay", wav)
 ensure
   File.delete(wav) if wav && File.exist?(wav)
@@ -94,6 +93,22 @@ end
 def speak_finnish_prompt(fi_text, piper_bin:, piper_model:)
   # Carrier phrase improves naturalness for short words like "ei".
   piper_speak("Suomeksi: #{ensure_terminal_punct(fi_text)}", piper_bin: piper_bin, piper_model: piper_model)
+end
+
+# In listen modes, allow the user to type 'r' to replay the audio.
+# Returns the user's non-replay input (may be nil on EOF).
+def prompt_with_replay(msg, spoken_fi, piper_bin:, piper_model:)
+  loop do
+    input = prompt(msg)
+    return nil if input.nil?
+
+    if input.strip.casecmp("r").zero?
+      speak_finnish_prompt(spoken_fi, piper_bin: piper_bin, piper_model: piper_model)
+      next
+    end
+
+    return input
+  end
 end
 
 # -----------------------------
@@ -194,14 +209,18 @@ def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:
   selected.each_with_index do |w, idx|
     say
     say "[#{idx + 1}/#{stats[:total]}]"
+
+    spoken_fi = nil
     if listen
       say "Audible Finnish: (listening…)"
-      spoken = w[:fi].sample
-      speak_finnish_prompt(spoken, piper_bin: piper_bin, piper_model: piper_model)
+      spoken_fi = w[:fi].sample
+      speak_finnish_prompt(spoken_fi, piper_bin: piper_bin, piper_model: piper_model)
       say "English: #{w[:en]}" unless listen_no_english
+      say "(Type 'r' to replay audio)"
     else
       say "English: #{w[:en]}"
     end
+
     answer_ok = false
 
     1.upto(2) do |attempt|
@@ -215,7 +234,11 @@ def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:
         say "Options:"
         options.each { |opt| say "  - #{opt}" }
 
-        input = prompt(listen ? "Type what you heard (Finnish): " : "Type the Finnish word: ")
+        if listen
+          input = prompt_with_replay("Type what you heard (Finnish): ", spoken_fi, piper_bin: piper_bin, piper_model: piper_model)
+        else
+          input = prompt("Type the Finnish word: ")
+        end
         kind, ok, matched = match_answer(input, correct_list, lenient: lenient)
 
         if ok
@@ -236,9 +259,12 @@ def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:
         else
           say "Yritä uudelleen." if attempt < 2
         end
-
       else
-        input = prompt(listen ? "Type what you heard (Finnish): " : "Finnish: ")
+        if listen
+          input = prompt_with_replay("Type what you heard (Finnish): ", spoken_fi, piper_bin: piper_bin, piper_model: piper_model)
+        else
+          input = prompt("Finnish: ")
+        end
         kind, ok, matched = match_answer(input, w[:fi], lenient: lenient)
 
         if ok
@@ -252,7 +278,6 @@ def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:
 
           others = w[:fi] - [matched]
           say "   Also accepted: #{others.join(' / ')}" unless others.empty?
-
           say "   (phonetic: #{w[:phon]})" unless w[:phon].empty?
 
           answer_ok = true
@@ -277,7 +302,7 @@ end
 # Output
 # -----------------------------
 
-def write_missed_file(input_path, stats, missed, lenient:, match_game:)
+def write_missed_file(input_path, stats, missed, lenient:, match_game:, listen:, listen_no_english:)
   base = File.basename(input_path, File.extname(input_path))
   filename = "#{base}_missed_#{Time.now.strftime('%Y%m%d_%H%M%S')}.yaml"
 
@@ -286,7 +311,9 @@ def write_missed_file(input_path, stats, missed, lenient:, match_game:)
       generated_at: Time.now.iso8601,
       source_file: File.expand_path(input_path),
       lenient_umlauts: lenient,
-      match_game: match_game
+      match_game: match_game,
+      listen: listen,
+      listen_no_english: listen_no_english
     },
     stats: stats,
     missed: missed
@@ -376,7 +403,9 @@ if missed.any?
     stats,
     missed,
     lenient: options[:lenient],
-    match_game: options[:match_game]
+    match_game: options[:match_game],
+    listen: options[:listen],
+    listen_no_english: options[:listen_no_english]
   )
 
   say
