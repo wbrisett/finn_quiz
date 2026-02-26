@@ -3,10 +3,11 @@
 A tiny command-line Finnish vocabulary quizzer that reads words from a YAML file and quizzes you in multiple modes:
 
 - **typing** (English shown → you type Finnish)
-- **match-game** (English shown → you type Finnish, with 3 Finnish options shown)
-- **listening** (Finnish is spoken via **Piper**; Finnish text is *hidden*)
-  - `--listen` : Finnish is spoken, **English is shown**
-  - `--listen-no-english` : Finnish is spoken, **English is hidden** (hard mode)
+- **reverse (fi→en)** (Finnish shown or spoken → you type English)
+- **match-game** (guided recall; 3 hints are shown, but you still type the answer)
+- **listening** (Finnish is spoken via **Piper**; Finnish text is hidden)
+  - `--listen` : Finnish is spoken, English is shown
+  - `--listen-no-english` : Finnish is spoken, English is hidden (hard mode)
 
 It tracks how many you got correct on the **1st** vs **2nd** try, and writes a “missed words” YAML file **only if you missed something**.
 
@@ -46,7 +47,6 @@ ruby finn_quiz.rb Example_yaml/finnish_days_of_week.yaml all \
 ```
 
 Tip: you can press `r` during listening mode to replay the audio.
-
 
 ---
 
@@ -94,9 +94,25 @@ ruby finn_quiz.rb words.yaml
 
 You’ll see English and type Finnish.
 
+### Reverse mode (Finnish → English)
+
+Practice translating Finnish into English:
+
+```bash
+ruby finn_quiz.rb words.yaml --reverse
+```
+
+Combine with listening:
+
+```bash
+ruby finn_quiz.rb words.yaml all --reverse --listen --match-game
+```
+
+In reverse mode, English may accept multiple forms (e.g., `20` or `twenty`) if defined in the YAML.
+
 ### Match-game mode
 
-Shows **three Finnish options**, but you still **type** the answer (better for spelling + memory).
+Shows **three Finnish hints**, but you still **type** the answer (guided recall rather than multiple choice).
 
 ```bash
 ruby finn_quiz.rb words.yaml --match-game
@@ -107,13 +123,17 @@ ruby finn_quiz.rb words.yaml --match-game
 **Listening with English shown**:
 
 ```bash
-ruby finn_quiz.rb words.yaml all --listen   --piper-bin /path/to/piper   --piper-model /path/to/fi_FI-voice.onnx
+ruby finn_quiz.rb words.yaml all --listen \
+  --piper-bin /path/to/piper \
+  --piper-model /path/to/fi_FI-voice.onnx
 ```
 
 **Listening with English hidden (hard mode)**:
 
 ```bash
-ruby finn_quiz.rb words.yaml all --listen-no-english   --piper-bin /path/to/piper   --piper-model /path/to/fi_FI-voice.onnx
+ruby finn_quiz.rb words.yaml all --listen-no-english \
+  --piper-bin /path/to/piper \
+  --piper-model /path/to/fi_FI-voice.onnx
 ```
 
 #### Tip: why we use a “carrier phrase”
@@ -127,6 +147,19 @@ That improves naturalness and intelligibility.
 
 ## Options
 
+## Options Summary
+
+| Flag | Purpose | Works With | Default |
+|------|---------|------------|---------|
+| `--reverse` | Finnish → English mode | typing, match-game, listen | off |
+| `--match-game` | Guided recall with 3 hints | typing, reverse, listen | off |
+| `--match-options MODE` | Control hint display in reverse match-game mode | reverse + match-game | `auto` |
+| `--listen` | Speak Finnish (English shown) | typing, match-game | off |
+| `--listen-no-english` | Speak Finnish (English hidden) | typing, match-game | off |
+| `--lenient-umlauts` | Accept `a/o` for `ä/ö` | typing only | off |
+| `--piper-bin PATH` | Path to Piper binary | listen modes | required |
+| `--piper-model PATH` | Path to voice model | listen modes | required |
+
 ### `--lenient-umlauts`
 Allows `a` for `ä` and `o` for `ö` (useful early on). If you use the lenient spelling, you still get credit, but it reminds you that umlauts matter.
 
@@ -139,6 +172,24 @@ Enable match-game mode:
 
 ```bash
 ruby finn_quiz.rb words.yaml --match-game
+```
+
+### `--match-options MODE`
+Control how hints are displayed in reverse match-game mode.
+
+```bash
+--match-options auto   # default
+--match-options en     # show English hints only
+--match-options both   # show Finnish → English mapping hints
+```
+
+Example (reverse mode with both):
+
+```
+Hints:
+  - kaksituhatta → 2000
+  - viisikymmentä → 50
+  - kaksikymmentäyksi → 21
 ```
 
 ### `--listen` / `--listen-no-english`
@@ -335,7 +386,7 @@ Finnish Quiz — 8 word(s) (mode: match-game)
 --------------------------------------------------
 
 [1/8] English: Thursday
-Options:
+Hints:
   - keskiviikko
   - viikonloppu
   - torstai
@@ -361,7 +412,7 @@ Finnish Quiz — 8 word(s) (mode: match-game, listen-no-english)
 
 [1/8]
 Audible Finnish: (listening…)
-Options:
+Hints:
   - maanantai
   - tiistai
   - viikonloppu
