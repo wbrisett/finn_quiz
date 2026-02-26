@@ -20,11 +20,40 @@ end
 def prompt(msg)
   print msg
   STDOUT.flush
-  STDIN.gets&.chomp
+  input = STDIN.gets&.chomp
+
+  return nil if input.nil?
+
+  trimmed = input.strip.downcase
+
+  if trimmed == "quit" || trimmed == "q"
+    print "Are you sure you want to quit? (y/N): "
+    STDOUT.flush
+    confirm = STDIN.gets&.chomp
+
+    if confirm && confirm.strip.downcase == "y"
+      puts
+      puts "👋 Exiting quiz. Kiitos!"
+      exit(0)
+    else
+      return ""  # Return empty input so quiz continues
+    end
+  end
+
+  input
 end
 
 def normalize_basic(s)
-  s.to_s.strip.downcase
+  t = s.to_s.strip
+
+  # Normalize Unicode to canonical form
+  t = t.unicode_normalize(:nfkc) rescue t
+
+  # Normalize curly quotes to straight quotes
+  t = t.gsub(/[’‘]/, "'")
+  t = t.gsub(/[“”]/, '"')
+
+  t.downcase
 end
 
 def strip_terminal_punct(s)
@@ -178,7 +207,15 @@ def load_words(path)
     fi = w["fi"] || w[:fi] || w["finnish"] || w[:finnish]
     phon = w["phon"] || w[:phon] || w["phonetic"] || w[:phonetic]
 
-    raise "Invalid word entry: #{w.inspect}" if en.to_s.strip.empty? || fi.nil?
+    raise "Invalid word entry: #{w.inspect}" if en.nil? || fi.nil?
+
+    en_list =
+      case en
+      when Array
+        en.map { |x| x.to_s.strip }.reject(&:empty?)
+      else
+        [en.to_s.strip]
+      end
 
     fi_list =
       case fi
@@ -188,9 +225,9 @@ def load_words(path)
         [fi.to_s.strip]
       end
 
-    raise "Invalid word entry: #{w.inspect}" if fi_list.empty?
+    raise "Invalid word entry: #{w.inspect}" if en_list.empty? || fi_list.empty?
 
-    { en: en.to_s.strip, fi: fi_list, phon: phon.to_s.strip }
+    { en: en_list, fi: fi_list, phon: phon.to_s.strip }
   end
 end
 
@@ -226,9 +263,9 @@ def match_answer(user, expected_list, lenient:)
 end
 
 
-def pick_distractors(pool, correct_fi_list, n: 2)
-  all_correct = correct_fi_list.to_a
-  candidates = pool.flat_map { |w| w[:fi] }.uniq - all_correct
+def pick_distractors(pool, correct_list, field: :fi, n: 2)
+  all_correct = correct_list.to_a
+  candidates = pool.flat_map { |w| w[field] }.uniq - all_correct
   raise "Not enough distractors." if candidates.size < n
   candidates.sample(n)
 end
@@ -237,7 +274,7 @@ end
 # Quiz Engine
 # -----------------------------
 
-def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:, piper_bin:, piper_model:, tts_template:)
+def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:, reverse:, match_options:, piper_bin:, piper_model:, tts_template:)
   stats = { total: selected.length, correct_1: 0, correct_2: 0, failed: 0 }
   missed = []
 
@@ -247,6 +284,7 @@ def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:
   if listen
     mode << (listen_no_english ? "listen-no-english" : "listen")
   end
+  mode << "fi→en" if reverse
   say "Finnish Quiz — #{stats[:total]} word(s) (mode: #{mode.join(', ')})"
   say "-" * 50
 
@@ -255,63 +293,163 @@ def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:
     say "[#{idx + 1}/#{stats[:total]}]"
 
     spoken = nil
-    if listen
-      say "Audible Finnish: (listening…)"
-      spoken = w[:fi].sample
-      speak_target_prompt(spoken, piper_bin: piper_bin, piper_model: piper_model, template: tts_template)
-      say "English: #{w[:en]}" unless listen_no_english
-      say "(Type 'r' to replay audio)"
+
+    if reverse
+      # Finnish → English mode
+      if listen
+        say "Audible Finnish: (listening…)"
+        spoken = w[:fi].sample
+        speak_target_prompt(spoken, piper_bin: piper_bin, piper_model: piper_model, template: tts_template)
+        say "(Type 'r' to replay audio)"
+      else
+        spoken = w[:fi].sample
+        say "Finnish: #{spoken}"
+      end
     else
-      say "English: #{w[:en]}"
+      # Normal English → Finnish mode
+      if listen
+        say "Audible Finnish: (listening…)"
+        spoken = w[:fi].sample
+        speak_target_prompt(spoken, piper_bin: piper_bin, piper_model: piper_model, template: tts_template)
+        say "English: #{w[:en]}" unless listen_no_english
+        say "(Type 'r' to replay audio)"
+      else
+        say "English: #{w[:en]}"
+      end
     end
 
     answer_ok = false
 
+    reverse_match_options = nil
+    if match_game && reverse
+      correct_list = w[:en]
+
+      shown_correct = correct_list.sample
+      style = if shown_correct =~ /^\d+$/
+                :digit
+              else
+                :word
+              end
+
+      distractor_words = (pool - [w]).sample(2)
+
+      distractors = distractor_words.map do |dw|
+        variants = dw[:en]
+        preferred = variants.find do |v|
+          style == :digit ? v =~ /^\d+$/ : v =~ /[A-Za-z]/
+        end
+        preferred || variants.first
+      end
+
+      correct_variant = correct_list.find do |v|
+        style == :digit ? v =~ /^\d+$/ : v =~ /[A-Za-z]/
+      end || shown_correct
+
+      reverse_match_options = ([correct_variant] + distractors).shuffle
+    end
+
     1.upto(2) do |attempt|
       if match_game
-        correct_list = w[:fi]
-        shown_correct = correct_list.sample
+        if reverse
+          # Finnish → English match-game (stable options across attempts)
+          correct_list = w[:en]
+          options_list = reverse_match_options
 
-        distractors = pick_distractors(pool, correct_list, n: 2)
-        options = ([shown_correct] + distractors).shuffle
+          display_mode = match_options
+          display_mode = "en" if display_mode == "auto"
 
-        say "Options:"
-        options.each { |opt| say "  - #{opt}" }
+          say "Hints:"
 
-        input = if listen
-                  prompt_with_replay("Type what you heard (Finnish): ", spoken, piper_bin: piper_bin, piper_model: piper_model, template: tts_template)
-                else
-                  prompt("Type the Finnish word: ")
-                end
+          if display_mode == "both"
+            # Build a simple lookup from English variant -> Finnish sample
+            en_to_fi = {}
+            pool.each do |ww|
+              ww[:en].each do |env|
+                en_to_fi[env] ||= ww[:fi].first
+              end
+            end
 
-        kind, ok, matched = match_answer(input, correct_list, lenient: lenient)
-
-        if ok
-          stats[:"correct_#{attempt}"] += 1
-
-          if kind == :umlaut_lenient
-            say "✅ Hyvä! Muista: ä ja ö ovat tärkeitä 😉"
+            options_list.each do |opt|
+              fi_hint = en_to_fi[opt]
+              say "  - #{fi_hint} → #{opt}"
+            end
           else
-            say "✅ Oikein!"
+            options_list.each { |opt| say "  - #{opt}" }
           end
 
-          others = correct_list - [matched]
-          say "   Also accepted: #{others.join(' / ')}" unless others.empty?
-          say "   (phonetic: #{w[:phon]})" unless w[:phon].empty?
+          input = if listen
+                    prompt_with_replay("Type the English meaning: ", spoken, piper_bin: piper_bin, piper_model: piper_model, template: tts_template)
+                  else
+                    prompt("English: ")
+                  end
 
-          answer_ok = true
-          break
+          kind, ok, matched = match_answer(input, correct_list, lenient: false)
+
+          if ok
+            stats[:"correct_#{attempt}"] += 1
+            say "✅ Oikein!"
+            others = correct_list - [matched]
+            say "   Also accepted: #{others.join(' / ')}" unless others.empty?
+            say "   (phonetic: #{w[:phon]})" unless w[:phon].empty?
+            say "   (English: #{w[:en].join(' / ')})"
+            answer_ok = true
+            break
+          else
+            say "Yritä uudelleen." if attempt < 2
+          end
+
         else
-          say "Yritä uudelleen." if attempt < 2
+          # English → Finnish match-game
+          correct_list = w[:fi]
+          shown_correct = correct_list.sample
+
+          distractors = pick_distractors(pool, correct_list, field: :fi, n: 2)
+          options_list = ([shown_correct] + distractors).shuffle
+
+          say "Hints:"
+          options_list.each { |opt| say "  - #{opt}" }
+
+          input = if listen
+                    prompt_with_replay("Type what you heard (Finnish): ", spoken, piper_bin: piper_bin, piper_model: piper_model, template: tts_template)
+                  else
+                    prompt("Type the Finnish word: ")
+                  end
+
+          kind, ok, matched = match_answer(input, correct_list, lenient: lenient)
+
+          if ok
+            stats[:"correct_#{attempt}"] += 1
+
+            if kind == :umlaut_lenient
+              say "✅ Hyvä! Muista: ä ja ö ovat tärkeitä 😉"
+            else
+              say "✅ Oikein!"
+            end
+
+            others = correct_list - [matched]
+            say "   Also accepted: #{others.join(' / ')}" unless others.empty?
+            say "   (phonetic: #{w[:phon]})" unless w[:phon].empty?
+            say "   (English: #{w[:en].join(' / ')})"
+
+            answer_ok = true
+            break
+          else
+            say "Yritä uudelleen." if attempt < 2
+          end
         end
       else
         input = if listen
-                  prompt_with_replay("Type what you heard (Finnish): ", spoken, piper_bin: piper_bin, piper_model: piper_model, template: tts_template)
+                  prompt_with_replay(reverse ? "Type the English meaning: " : "Type what you heard (Finnish): ", spoken, piper_bin: piper_bin, piper_model: piper_model, template: tts_template)
                 else
-                  prompt("Finnish: ")
+                  prompt(reverse ? "English: " : "Finnish: ")
                 end
 
-        kind, ok, matched = match_answer(input, w[:fi], lenient: lenient)
+        if reverse
+          expected = w[:en]
+          kind, ok, matched = match_answer(input, expected, lenient: false)
+        else
+          kind, ok, matched = match_answer(input, w[:fi], lenient: lenient)
+        end
 
         if ok
           stats[:"correct_#{attempt}"] += 1
@@ -325,6 +463,7 @@ def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:
           others = w[:fi] - [matched]
           say "   Also accepted: #{others.join(' / ')}" unless others.empty?
           say "   (phonetic: #{w[:phon]})" unless w[:phon].empty?
+          say "   (English: #{w[:en].join(' / ')})"
 
           answer_ok = true
           break
@@ -335,8 +474,11 @@ def run_quiz(selected, pool:, lenient:, match_game:, listen:, listen_no_english:
     end
 
     unless answer_ok
-      stats[:failed] += 1
-      say "❌ Oikea sana: #{w[:fi].join(' / ')}#{w[:phon].empty? ? '' : " (#{w[:phon]})"}"
+      if reverse
+        say "❌ Correct answer: #{w[:en].join(' / ')}"
+      else
+        say "❌ Oikea sana: #{w[:fi].join(' / ')}#{w[:phon].empty? ? '' : " (#{w[:phon]})"}"
+      end
       missed << w
     end
   end
@@ -378,6 +520,8 @@ options = {
   match_game: false,
   listen: false,
   listen_no_english: false,
+  reverse: false,
+  match_options: "auto",
   piper_bin: ENV["PIPER_BIN"],
   piper_model: ENV["PIPER_MODEL"],
   tts_template: ENV["TTS_TEMPLATE"] || "Suomeksi: {text}.",
@@ -394,6 +538,14 @@ parser = OptionParser.new do |opts|
   opts.on("--listen-no-english", "Listening mode without showing English translation") do
     options[:listen] = true
     options[:listen_no_english] = true
+  end
+
+  opts.on("--reverse", "Practice Finnish → English instead of English → Finnish") do
+    options[:reverse] = true
+  end
+
+  opts.on("--match-options MODE", "Match-game options display: auto|fi|en|both (default: auto)") do |v|
+    options[:match_options] = v.to_s.strip.downcase
   end
 
   opts.on("--piper-bin PATH", "Path to piper executable (or set PIPER_BIN env var)") { |v| options[:piper_bin] = v }
@@ -420,6 +572,8 @@ stats, missed = run_quiz(
   match_game: options[:match_game],
   listen: options[:listen],
   listen_no_english: options[:listen_no_english],
+  reverse: options[:reverse],
+  match_options: options[:match_options],
   piper_bin: options[:piper_bin],
   piper_model: options[:piper_model],
   tts_template: options[:tts_template]
