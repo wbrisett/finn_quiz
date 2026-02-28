@@ -1,3 +1,8 @@
+# Important note: 
+I have ported this project to a more generic project which I will maintain here: https://github.com/wbrisett/linguatrain
+I did this to support more than just Finnish. 
+If you find any defects in this code, use the linguatrain to report them. Kiitos! 
+
 # finn_quiz.rb
 
 A tiny command-line Finnish vocabulary quizzer that reads words from a YAML file and quizzes you in multiple modes:
